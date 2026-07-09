@@ -20,9 +20,9 @@ Dukazy:
 - Register `0x20` se pouziva pro NTC/temperature ADC prevod.
 - Register `0x27` se pouziva jako proudovy/shunt ADC kandidat.
 - O2Micro katalog uvadi `OZ3705` jako 3-5 cell DFE s 12bit ADC, I2C a cell-balance rizenym hostem pres I2C.
+- Lokalne pridany datasheet `OZ3705D 3~5 LiIon Cells Digital Front End (DFE) with Embedde.pdf` potvrzuje stejnou rodinu/capability class, ale jeho register mapa se neshoduje s firmwarem ani s realnym sniffem.
 
-Nebyl zatim nalezen verejny plny datasheet/register-map dokument. Katalog ale posouva identifikaci z obecneho `3705T` na velmi silny kandidat `OZ3705`.
-Porad neni spravne tvrdit oficialni nazvy registru bez plneho datasheetu.
+Proto neni spravne prepisovat pracovni register mapu PBP00x na nazvy z OZ3705D datasheetu. Aktualni nejlepsi vyklad je, ze PBP00x pouziva `3705T` / OZ3705 variantu, revizi, nebo jinou register banku nez dokumentovany `OZ3705D`.
 
 `BQ7718` je na PBP005 schematu take pritomen (`U10`), ale jde o samostatny over-voltage protector. Neni to SMBus zarizeni na `0x29`.
 
@@ -188,6 +188,189 @@ To velmi dobre sedi s lokalni evidenci:
 - `0x27` odpovida current-sense ADC
 - `0x0E` se podle firmware chova jako hostem rizeny balance register
 
+Zdroj katalogu:
+
+```text
+https://www.o2micro.com/products/O2%20807%26G807C%20Product%20Catalog%202023-6-26%28final%29.pdf
+```
+
+## OZ3705D datasheet porovnani
+
+Lokalni PDF:
+
+```text
+analysis/OZ3705D 3~5 LiIon Cells Digital Front End (DFE) with Embedde.pdf
+```
+
+Metadata z PDF:
+
+| Polozka | Hodnota |
+| --- | --- |
+| Title | `OZ3705D Datasheet V1.0 (2024-01-18)` |
+| Creation date | `2024-01-18` |
+| Modified date | `2024-06-25` |
+| Pages | `63` |
+
+Datasheet potvrzuje obecnou identifikaci rodiny:
+
+- 3 az 5 Li-ion clanku
+- I2C do 400 kHz
+- SAR ADC a CADC pro mereni clanku/proudu/teplot
+- embedded protection logiku pro OVP/UVP/DOC/SC/COC/OTP/UTP
+- hostem riditelny cell balancing pres I2C
+- ALERT/interrupt logiku a wake/event flagy
+
+Register mapa ale nesedi s tim, co realne pouziva firmware/sniff:
+
+| Firmware/sniff command | Firmware-derived vyznam | OZ3705D datasheet vyznam | Zaver |
+| --- | --- | --- | --- |
+| `0x02` | status/protection, clear `0xFFFF`, ADOC mask `0x1000` | `IER1`, interrupt enable register | primy konflikt |
+| `0x03` | config/control kandidat, ve sniffu write `0xFC9C` | `ALERTNR2`, flag register | primy konflikt |
+| `0x0E` | cell-balance control, `0xFFC0` off, `0xFFC0 | (1 << cell)` on | `SCANCTRL` | primy konflikt; datasheet ma balance jinde |
+| `0x20` | NTC/temperature ADC | reserved | primy konflikt |
+| `0x21..0x25` | cell voltage 1..5, `raw12 * 5 / 4` | `CELL01V_CTO..CELL05V_CTO`, signed CTO check data | data ze sniffu nedavaji smysl jako OZ3705D signed CTO hodnoty |
+| `0x27` | current/shunt ADC kandidat | neni datasheetovy `ISENS`; `ISENS` je `0x55` | primy konflikt |
+
+Uzitecne nazvy z OZ3705D, ktere mohou pomoct jako terminologie, ale nejsou primo mapovane na PBP00x commandy:
+
+| OZ3705D register | Datasheetovy vyznam |
+| --- | --- |
+| `0x00 HWID` | chip id, podle datasheetu fixed low byte `0x05` |
+| `0x01 ALERTNR1` | interrupt/event flags skupina 1 |
+| `0x03 ALERTNR2` | protection/event flags skupina 2 |
+| `0x12 STATUS` | live status/protection state bits |
+| `0x13 FCBSEL` | final cell-balance readback |
+| `0x15 CBCTRL` | host cell-balance selection |
+| `0x41..0x45 CELL01V..CELL05V` | normal cell voltage registers |
+| `0x55 ISENS` | current-sense SAR register |
+| `0x56/0x57 THM0V/THM1V` | thermistor/temperature ADC registers |
+| `0xAB WKUP_INTR` | wake interrupt flags |
+
+Prakticky zaver:
+
+- datasheet je vyborny pro pochopeni schopnosti cipu a zkratek typu OVP/UVP/DOC/COC/SC/OTP/UTP
+- neni pouzitelny jako prima register mapa pro PBP002/PBP004/PBP005 bez dalsiho overeni
+- firmware-derived mapa `0x02/0x03/0x05/0x0E/0x20..0x27` zustava pro PBP00x autoritativnejsi nez OZ3705D PDF
+- dalsi krok pro identifikaci je zjistit, jestli `3705T` neni starsi/custom `OZ3705` varianta nebo jestli firmware nepouziva jinou page/bank/register window
+
+## Pravdepodobna pricina konfliktu registru
+
+Shoda commandu `0x21..0x25` je realna, ale nejde o shodu datoveho formatu.
+
+Stejny sniff sample:
+
+```text
+0x21 -> 0xFC72
+0x24 -> 0xFC4E
+```
+
+Interpretace:
+
+| Word | Legacy/PBP00x `raw12 * 1.25mV` | OZ3705D signed `0.625mV/4` | Byte-swap signed `0.625mV/4` |
+| --- | ---: | ---: | ---: |
+| `0xFC72` | `3982.5 mV` | `-142.2 mV` | `4599.4 mV` |
+| `0xFC4E` | `3937.5 mV` | `-147.8 mV` | `3159.4 mV` |
+
+Legacy/PBP00x interpretace dava konzistentni 5s pack kolem `19.87 V` a sedi s firmware funkci `0x1A5C`, ktera bere jen low 12 bitu:
+
+```c
+raw12 = word & 0x0FFF;
+cell_mv = raw12 * 5 / 4;
+```
+
+OZ3705D interpretace nedava fyzikalni smysl pro realne clanky. Jednoducha endian chyba take nesedi, protoze byte-swap by delal ruzne nerealne hodnoty a firmware tak data evidentne necte.
+
+Porovnani rodiny:
+
+| Zdroj | Register mapa / ADC model | Vztah k PBP00x |
+| --- | --- | --- |
+| O2Micro katalog `OZ3705` | 3-5s DFE, 12bit ADC, cell/current/temp read pres I2C, host cell balance | nejlepsi match s firmwarem a sniffem |
+| Board/schema PBP005 | U3 symbol `3705`, text `3705T`, blok `Analog Front End` | potvrzuje `3705T`, ne `OZ3705D` |
+| `OZ3705D` datasheet V1.0 | novejsi 14bit SAR + 16bit CADC model; normal cell data `0x41..0x45`, balance `0x15`, current `0x55` | stejna sirsi rodina, ale jina register mapa |
+| `OZ37205` datasheet V1.1 | opet jina mapa: cell data `0x11..0x15`, current `0x21`, THM0 `0x22`, balance `0x4E` | ukazuje, ze O2Micro u pribuznych cipu meni register mapu |
+
+Aktualni nejpravdepodobnejsi vysvetleni:
+
+1. PBP00x nepouziva presne `OZ3705D` register mapu.
+2. Pouziva starsi/legacy `OZ3705` nebo zakaznickou `3705T` variantu s 12bit ADC mapou.
+3. `0x21..0x25` mohou byt u noveho `OZ3705D` zachovane jako CTO/trigger kanaly, ale firmware PBP00x je pouziva v legacy 12bit rezimu jako bezne cell voltage kanaly.
+4. Nezdokumentovane registry jsou mozne, ale mene pravdepodobne nez rozdil varianty/revize. Kdyby slo jen o undocumented registry `OZ3705D`, cekal bych, ze datasheetove normalni registry `0x41..0x45`, `0x15`, `0x55` se ve firmware aspon nekde objevi. Zatim se neobjevuji.
+
+Rozhodovaci test pri fyzickem pristupu:
+
+- read-only cist `0x00`; pokud vrati `0x0005`/`0x05xx`, sedi spis `OZ3705D`; pokud `0x3705`, sedi spis `OZ37205`-style ID; jina hodnota muze byt `3705T`
+- read-only porovnat `0x21..0x25` a `0x41..0x45`; pokud `0x41..0x45` davaji rozumne signed 16bit napeti, muze tam byt `OZ3705D` kompatibilni bank; pokud ne, zustava legacy `OZ3705T`
+- read-only cist `0x15` a `0x13` po aktivnim balancingu by rozlisilo datasheetovy `CBCTRL/FCBSEL`; bez aktivniho zapisu ale jen opatrne, protoze balance write neni read-only
+- pro pasivni rezim zustava nejbezpecnejsi jen sniffovat existujici MCU provoz a nedavat vlastni write do AFE
+
+### Pinout evidence
+
+PBP005 KiCad schema pouziva pro U3 lokalni symbol `3705` a text `3705T`. Symbol je 16pin, ne 20/24pin.
+
+Z automatickeho pruchodu schatu vychazi tyto labely primo u U3:
+
+| Pin / okoli | Net label |
+| --- | --- |
+| pin 2 | `BT5_SENSE` |
+| pin 3 | `BT4_SENSE` |
+| pin 4 | `BT3_SENSE` |
+| pin 5 | `BT2_SENSE` |
+| pin 6 | `BT1_SENSE` |
+| pin 8 | `I_SENS_L` |
+| pin 9 | `I_SENS_H` |
+| pin 10 | `THERM` |
+| pin 11 | `2V5_REG` |
+| pin 12 | `5V_REG` |
+| okoli hornich pinu | `SDA`, `SCL`, `PIO19`, `U3_PWR` |
+
+To sedi na katalogovy legacy `OZ3705` signal set:
+
+```text
+BAT1..BAT5, ISP/ISN, THM, VREF, V3.3V, VDDA/5V, VCC, SDA, SCLK, INT#
+```
+
+Naopak to nesedi na `OZ3705D` pinout:
+
+- `OZ3705D` je QFN24/SSOP24, ne 16pin
+- ma navic `BAT0`, separatni `GNDA/GNDD`, `THM1`, `WKUP/VM`, `VM2`, `CHG`, `DSG`, `EFETC`, `ALERTN`, `VMCU`, `V5V`
+- PBP005 U3 zapojeni vypada jako starsi jednodussi AFE bez integrovanych CHG/DSG driver pinu v teto podobe
+
+`OZ37205` take nesedi jako primy pinout match:
+
+- QFN20/SSOP24
+- registry i pinout jsou jine: `CELL01V` na `0x11..0x15`, `ISENS` na `0x21`, balance na `0x4E`
+
+Zaver pinoutu: konflikt registru neni jen nepresnost datasheetu. PBP005 `3705T` se fyzicky a funkcne chova jako legacy `OZ3705` 16pin AFE/DFE, zatimco pridane `OZ3705D` PDF popisuje novejsi/odlisnou 24pin variantu.
+
+### Firmware scan proti D-variantam
+
+Presny binarni scan vsech PBP002/PBP004/PBP005 fixed/lockout image nenasel tyto D/OZ37205 magic hodnoty:
+
+| Hodnota | Vyznam v datasheetech | Vysledek ve firmware |
+| --- | --- | --- |
+| `0x3705` | unlock/config nebo chip-id magic u novejsich variant | nenalezeno jako exact LE/BE word |
+| `0xDEED` | shutdown command u D/OZ37205 power-mode registru | nenalezeno |
+| `0xABBA` | sleep + MCU/LDO down command | nenalezeno |
+| `0xBCCB` | sleep command | nenalezeno |
+| `0xCDDC` | deep sleep command u `OZ3705D` | nenalezeno |
+
+PBP005 AFE kod potvrzuje legacy commandy v realnych SMBus kontextech:
+
+| Funkce / oblast | Command | Vyznam |
+| --- | --- | --- |
+| `0x1D48`, `0x1D60`, `0x1DFC` | `0x02` | status/protection/ADOC clear-check |
+| `0x1CDC` | `0x0E` | balance control write `0xFFC0` / `0xFFC0 | bit` |
+| `0x1B6C` | `0x20` | NTC/temperature raw read |
+| `0x1A5C` | `0x21..0x25` | computed `0x20 + cell_index`, cell voltage raw12 |
+| `0x18E2/0x1930` | `0x27` | current/shunt raw read |
+
+Male immediate hodnoty `0x41`, `0x42`, `0x55`, `0x15` se v binarce prirozene vyskytuji i mimo AFE kod, ale nebyl nalezen dukaz, ze by byly pouzite jako commandy pro slave `0x29`. Proto je aktualni stav:
+
+```text
+OZ3705D register map = nepouzita / necilena firmwarem PBP00x
+legacy OZ3705/3705T map = podporena pinoutem, firmwarem i sniffem
+```
+
 ## Pracovni register mapa
 
 | Command | Pracovni nazev | Staticky dukaz |
@@ -199,6 +382,26 @@ To velmi dobre sedi s lokalni evidenci:
 | `0x20` | `AFE_TemperatureOrNTC_ADC` | `0x1B6C` cte raw 12bit hodnotu a prevadi ji pres tabulku na teplotu. |
 | `0x21..0x25` | `AFE_CellVoltage_1..5` | `0x1A5C(index)` cte command `0x20 + index`, bere `raw & 0x0FFF` a vraci `raw * 5 / 4`. |
 | `0x27` | `AFE_CurrentOrShunt_ADC` kandidat | `0x18E2/0x1930` cte `0x27` 32x, prumeruje a pouziva pro vypocet proudu/offsetu. |
+
+## Dynamicka emulace AFE vrstvy
+
+Cast PBP005 AFE vrstvy je dynamicky spustitelna pres hybridni emulator:
+
+```powershell
+python tools\pbp005_emulator.py afe-read --cmd 0x02
+python tools\pbp005_emulator.py afe-cell --index 1
+python tools\pbp005_emulator.py afe-adoc --afe-reg 0x02=0x9082
+python tools\pbp005_emulator.py afe-balance --cell 3
+```
+
+Emulator stubuje `0x36F8 SMBus_Transfer` a pro slave `0x29` vraci word registry s korektnim SMBus PEC. Tim lze bez fyzicke baterie overovat vyssi firmware funkce:
+
+| Firmware funkce | Emulator prikaz | Overeno |
+| --- | --- | --- |
+| `0x17AC` | `afe-read` | read `0x02 -> 0x8082`, PEC `0xBA` |
+| `0x1A04` | `afe-cell` | read `0x21 -> 0xFC72`, prepocet na `3982 mV` |
+| `0x1D48` | `afe-adoc` | `0x8082 -> 0`, `0x9082 -> 1` |
+| `0x1CDC` | `afe-balance` | `cell=3` zapise `0x0E = 0xFFC8` s PEC `0x5D` |
 
 ### Cell voltage format
 
@@ -386,14 +589,16 @@ Potvrzeno:
 - SMBus PEC CRC-8 `0x07`
 - realny board component label/marking `3705T`
 - velmi silny katalogovy kandidat `OZ3705`
+- lokalni `OZ3705D` datasheet potvrzuje rodinu, ale register mapa neodpovida PBP00x firmware/sniffu
 - funkce boardu: analog front end pro 5 clanku, NTC a proud/shunt
 - firmware register subset `0x02`, `0x03`, `0x05`, `0x0E`, `0x20..0x25`, `0x27`
 
 Nezjisteno:
 
-- oficialni nazvy registru
+- presna varianta/revize `3705T` a duvod rozdilu proti `OZ3705D`
+- oficialni nazvy registru pro firmware-derived commandy PBP00x
 - presny vyznam status bitu v `0x02`
-- plna oficialni register mapa `OZ3705`
+- plna oficialni register mapa konkretni PBP00x varianty `3705T`
 
 Nejlepsi dalsi overeni:
 

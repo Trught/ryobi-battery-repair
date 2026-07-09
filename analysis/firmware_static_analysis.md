@@ -296,6 +296,22 @@ Potvrzena pracovni register mapa podle firmware a `files/ryobi_battery_i2c_read.
 | `0x21..0x25` | pet cell-voltage kanalu, raw12 prepocet `raw * 5 / 4` |
 | `0x27` | current/shunt ADC kandidat |
 
+Lokalni datasheet `analysis/OZ3705D 3~5 LiIon Cells Digital Front End (DFE) with Embedde.pdf` potvrzuje O2Micro 3-5 cell DFE rodinu, I2C, mereni clanku/proudu/teplot a hostem rizeny balancing. Jeho register mapa ale primo nesedi na PBP00x firmware/sniff:
+
+| PBP00x command | PBP00x vyznam | OZ3705D datasheet |
+| --- | --- | --- |
+| `0x02` | status/protection, ADOC mask `0x1000` | `IER1` interrupt enable |
+| `0x0E` | balance control kandidat | `SCANCTRL`; datasheetovy balance register je `0x15 CBCTRL` |
+| `0x20` | NTC/temperature ADC | reserved |
+| `0x21..0x25` | cell voltage 1..5 | CTO check data; normal voltage je `0x41..0x45` |
+| `0x27` | current/shunt ADC kandidat | datasheetovy current register je `0x55 ISENS` |
+
+Zaver: OZ3705D PDF pouzivat jako rodinny/terminologicky zdroj, ne jako primou register mapu pro PBP002/PBP004/PBP005. Detailni porovnani je v `analysis/afe_3705t_smbus.md`.
+
+Pravdepodobna pricina konfliktu: PBP00x `3705T` vypada jako starsi/legacy `OZ3705` nebo zakaznicka varianta s 12bit ADC mapou. O2Micro katalogovy `OZ3705` uvadi 12bit ADC a hostem rizene cell/current/temp mereni pres I2C, coz sedi na firmware prepocet `word & 0x0FFF`. Naproti tomu lokalni `OZ3705D` a `OZ37205` datasheety popisuji novejsi/odlisne register mapy se signed 16bit daty. Stejny sniff word `0xFC72` dava v PBP00x interpretaci `3982.5 mV`, ale jako OZ3705D signed hodnota jen cca `-142 mV`, tedy fyzikalne nesmysl.
+
+Pinout PBP005 tento zaver podporuje: U3 je lokalni 16pin symbol `3705` s textem `3705T` a nety `BT1..BT5`, `I_SENS_H/L`, `THERM`, `2V5_REG`, `5V_REG`, `SDA/SCL`. To odpovida katalogovemu legacy `OZ3705` signal setu, ne 24pin `OZ3705D` ani 20/24pin `OZ37205`. Exact binarni scan vsech PBP002/PBP004/PBP005 image nenasel D-variant magic hodnoty `0x3705`, `0xDEED`, `0xABBA`, `0xBCCB`, `0xCDDC`.
+
 Pravdepodobny read ramec:
 
 ```text
@@ -812,8 +828,36 @@ Pouzite vystupni/periferie konstanty v service FSM:
 - `14100000`
 - `10100000`
 
-Tato funkce tedy pravdepodobne neresi D-tech UART framing jako PBP004, ale board/service signalizaci pres GPIO/piny a timeout patterny.
+PBP005 schema mapuje stavove LED na `PIO0_28 = LED1`, `PIO0_27 = LED2`, `PIO0_26 = LED3`, `PIO0_20 = LED4`.
+Tim se potvrzuje, ze masky v service FSM jsou LED masky:
+
+| Maska | LED bity |
+| --- | --- |
+| `0x1C100000` | `LED1 + LED2 + LED3 + LED4` |
+| `0x18000000` | `LED1 + LED2` |
+| `0x14000000` | `LED1 + LED3` |
+| `0x10100000` | `LED1 + LED4` |
+| `0x0C000000` | `LED2 + LED3` |
+| `0x08100000` | `LED2 + LED4` |
+| `0x04100000` | `LED3 + LED4` |
+| `0x1C000000` | `LED1 + LED2 + LED3` |
+| `0x18100000` | `LED1 + LED2 + LED4` |
+| `0x14100000` | `LED1 + LED3 + LED4` |
+| `0x0C100000` | `LED2 + LED3 + LED4` |
+
+`0xA0002200`, `0xA0002280` a `0xA0002300` odpovidaji pracovnim `GPIO_SET0`, `GPIO_CLR0` a `GPIO_NOT0`.
+Tato funkce tedy pravdepodobne neresi D-tech UART framing jako PBP004, ale board/service signalizaci pres LED/GPIO piny a timeout patterny.
 PBP005 D-tech fixture auth tak zustava nepotvrzena.
+
+PBP005 ma tlacitko stavove indikace `PB1 / IND_SW` na `PIO0_15`.
+Firmware cte tento vstup pres GPIO word alias `0xA000103C`:
+
+| Adresa | Pracovni nazev | Vyznam |
+| --- | --- | --- |
+| `0x4D9C` | `Indicator_Button_SampleLow` kandidat | Pokud je `PIO0_15` nulovy, nastavi flag na `0x100003C8`. |
+| `0x4E98` | `Wait_Indicator_Button_PressRelease` | Ceka na aktivni-low stisk (`GPIO_W15 == 0`) a potom na uvolneni (`GPIO_W15 != 0`). |
+
+LED/service test vetve typicky volaji `0x2120(state, timeout)`, potom `0x4E98`, a teprve pak prejdou na dalsi LED pattern.
 
 Prakticky PBP005 tooling:
 
@@ -908,7 +952,7 @@ Nejdulezitejsi nezname:
 3. Prakticky overit zdroj marker hodnoty `0xA5`: u PBP004 request `0x04` vola `0x4040`, ale v teto vetvi staticky vynucuje low byte `0x5A`; potvrzeny `0xA5` setter zatim neni nalezen u zadneho modelu.
 4. Prakticky overit PBP004 read-like fixture request `0x0A` proti realne baterii; staticky kopiruje tri bloky po `0x2A` bajtech a posila delku `0x7F`.
 5. Presny vyznam stavu `0x00`, `0x01`, `0x02`, `0x03`, `0xFE`, `0xFF`.
-6. Plny datasheet/register mapa pro O2Micro `OZ3705` / board marking `3705T`, hlavne oficialni nazvy registru `0x02` a `0x0E`.
+6. Presna identifikace `3705T` varianty/revize: lokalni `OZ3705D` datasheet potvrzuje rodinu, ale register mapa se lisi od PBP00x firmware/sniffu.
 7. Zda PBP005 ma nejaky jiny aktivni service protokol mimo PBP004-style D-tech. PBP004 fixture key, auth stringy ani packet parser nebyly v PBP005 nalezeny.
 8. Prakticke overeni D-tech CRC a auth proti realne baterii.
 9. Prakticky overit, zda se PBP002 persistentni fault bit `0x80` v realnych dumpech vubec objevi; staticky nebyl nalezen zadny normalni setter do `ctx+0x3B`.

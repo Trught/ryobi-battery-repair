@@ -73,6 +73,20 @@ Log string teto vetve:
 F2Flsh:x%X
 ```
 
+Dynamicky reprodukovatelne pres emulator:
+
+```powershell
+python tools\pbp005_emulator.py fault-persist --current-fault 0x40 --old-word 0x00000000
+python tools\pbp005_emulator.py fault-persist --current-fault 0x40 --old-word 0x00000040
+```
+
+Emulator rozlisuje oba NVM write call-site:
+
+| Call-site | Vyznam |
+| --- | --- |
+| `pc=0x4C1C` | prvni zapis `current_fault | (old_word << 8)` pokud se low byte lisi |
+| `pc=0x4CA8` | druhy zapis `fault_word << 8` |
+
 ## Fault bity PBP005
 
 Event latch base:
@@ -196,6 +210,23 @@ Pouziti markeru ve fault vetvich:
 
 To je drobny rozdil proti PBP002/PBP004: PBP005 marker B gateuje nejen under-voltage, ale i over-temperature vetev.
 
+### Runtime `ctx+0x08 = 0x08` v emulatoru
+
+Defaultni `bms-runtime` harness konci s `ctx+0x08 = 0x08`, ale instrumentace ukazala, ze tento zapis nevznika v marker-B `EUVs` vetvi na `0x4840`.
+Aktualni tok je:
+
+```text
+0x4446  ctx+0x08 = 0
+0x45CA  call 0x04E8(r0=1, state=sp+0x14)
+0x4608  ctx+0x08 = (old & 0xF3) | 0x08
+```
+
+Alternativni vetev pri `0x04E8 != 0` nastavuje `0x04` na `0x45DA`.
+V defaultnim emulatoru je `state=0`, flag `0x100003B4 == 0`, helper pouziva timer `0x100003E8` s timeoutem `1000` a na prvnim pruchodu vraci `0`.
+
+Pracovni zaver: tento konkretni `0x08` je per-loop event/status selector z helperu `0x04E8`, ne persistentni fault zapis.
+Proto v emulovanem defaultnim behu zustava `0x7E94 = 0x00000000`.
+
 ## Service/fixture automat 0x213C
 
 Struktura:
@@ -277,6 +308,118 @@ A0001050
 10100000
 ```
 
+### Stavove LED / GPIO vystupy
+
+PBP005 schema mapuje ctyri stavove LED na LPC GPIO port 0:
+
+| MCU pin | GPIO bit mask | LED |
+| --- | --- | --- |
+| `PIO0_28` | `0x10000000` | `LED1` |
+| `PIO0_27` | `0x08000000` | `LED2` |
+| `PIO0_26` | `0x04000000` | `LED3` |
+| `PIO0_20` | `0x00100000` | `LED4` |
+
+Tlacitko pro spusteni/zmenu stavove indikace je ve schematu `PB1 / IND_SW` na `PIO0_15/ADC_8`.
+Firmware ho cte pres LPC GPIO word alias:
+
+| MCU pin | GPIO alias | Pracovni nazev |
+| --- | --- | --- |
+| `PIO0_15` | `0xA000103C` | `IND_SW` / LED indicator button |
+
+Tim se potvrzuje, ze `0x213C` neni jen obecny service automat, ale primo LED/service GPIO pattern automat. Pouziva LPC GPIO registry:
+
+| Adresa | Pracovni nazev | Vyznam |
+| --- | --- | --- |
+| `0xA0002200` | `GPIO_SET0` | nastaveni vystupnich bitu portu 0 |
+| `0xA0002280` | `GPIO_CLR0` | mazani vystupnich bitu portu 0 |
+| `0xA0002300` | `GPIO_NOT0` | toggle vystupnich bitu portu 0 |
+| `0xA0001050` | `GPIO_W20` kandidat | word alias pro `PIO0_20` / `LED4` |
+
+Pouzite masky odpovidaji kombinacim ctyr LED:
+
+| Maska | LED bity |
+| --- | --- |
+| `0x1C100000` | `LED1 + LED2 + LED3 + LED4` |
+| `0x18000000` | `LED1 + LED2` |
+| `0x14000000` | `LED1 + LED3` |
+| `0x10100000` | `LED1 + LED4` |
+| `0x0C000000` | `LED2 + LED3` |
+| `0x08100000` | `LED2 + LED4` |
+| `0x04100000` | `LED3 + LED4` |
+| `0x1C000000` | `LED1 + LED2 + LED3` |
+| `0x18100000` | `LED1 + LED2 + LED4` |
+| `0x14100000` | `LED1 + LED3 + LED4` |
+| `0x0C100000` | `LED2 + LED3 + LED4` |
+
+Zakladni LED vystupni handlery:
+
+| State / handler | GPIO mask | Registr | Pracovni vyznam |
+| --- | --- | --- | --- |
+| `0x01 / 0x22A4` | `0x1C100000` | `GPIO_SET0` | vsechny 4 LED bity; alias i pro `0x11` a `0x88` |
+| `0x02 / 0x22AC` | `0x1C100000` | `GPIO_SET0/GPIO_CLR0` | fault/lockout blikani vsech 4 LED bitu |
+| `0x07 / 0x22F0` | `0x18000000` | `GPIO_SET0` | `LED1 + LED2` |
+| `0x08 / 0x22F8` | `0x14000000` | `GPIO_SET0` | `LED1 + LED3` |
+| `0x09 / 0x2300` | `0x10100000` | `GPIO_SET0` | `LED1 + LED4` |
+| `0x0A / 0x2306` | `0x0C000000` | `GPIO_SET0` | `LED2 + LED3` |
+| `0x0B / 0x230E` | `0x08100000` | `GPIO_SET0` | `LED2 + LED4` |
+| `0x0C / 0x2316` | `0x04100000` | `GPIO_SET0` | `LED3 + LED4` |
+| `0x0D / 0x231E` | `0x1C000000` | `GPIO_SET0` | `LED1 + LED2 + LED3` |
+| `0x0E / 0x2326` | `0x18100000` | `GPIO_SET0` | `LED1 + LED2 + LED4` |
+| `0x0F / 0x232C` | `0x14100000` | `GPIO_SET0` | `LED1 + LED3 + LED4` |
+| `0x10 / 0x2332` | `0x0C100000` | `GPIO_SET0` | `LED2 + LED3 + LED4` |
+| `0x81 / 0x2360` | `0x0C100000` a `PIO0_20` alias | `GPIO_CLR0/GPIO_SET alias` | cell-voltage band 1 pattern |
+| `0x82 / 0x237E` | LED masky pres casovac | `GPIO_SET0/GPIO_CLR0/GPIO_NOT0` | cell-voltage band 2 blikaci pattern |
+| `0x83 / 0x239E` | LED masky pres casovac | `GPIO_SET0/GPIO_CLR0/GPIO_NOT0` | cell-voltage band 3 blikaci pattern |
+| `0x84..0x87` | LED masky pres casovac | `GPIO_SET0/GPIO_CLR0/GPIO_NOT0` | timed/special service patterny |
+
+Poznamka: tabulka popisuje logicke GPIO bity. Presnou polaritu LED, tedy zda `GPIO_SET0` znamena fyzicky "LED sviti", je potreba potvrdit podle zapojeni nebo merenim.
+
+### Tlacitko IND_SW a LED test sekvence
+
+Firmware ma prime runtime cteni `PIO0_15`:
+
+| Adresa | Pracovni nazev | Chovani |
+| --- | --- | --- |
+| `0x4D9C` | `Indicator_Button_SampleLow` kandidat | Nacte `0xA000103C`; pokud je hodnota `0`, nastavi byte flag na `0x100003C8`. |
+| `0x4E98` | `Wait_Indicator_Button_PressRelease` | Blokujici helper: opakovane cte `0xA000103C`, ceka na `0`, potom ceka na navrat na `1`. |
+
+`0x4E98` tedy interpretuje stisk jako aktivni-low vstup. Sekvence je:
+
+```c
+while (GPIO_W15 != 0) {
+    delay(100);
+}
+while (GPIO_W15 == 0) {
+}
+```
+
+Hlavni call-site jsou LED/service test vetve. Typicky tok:
+
+```text
+0x2120(state, timeout);
+0x4E98();              // cekej na stisk a uvolneni IND_SW
+0x2120(next_state, timeout);
+```
+
+Zname volajici:
+
+| Call-site | Predchozi LED/service state | Vyznam |
+| --- | --- | --- |
+| `0x50C0 -> 0x50C4` | `0x06` | LED/service krok, pak cekani na `IND_SW` |
+| `0x51E2 -> 0x51E6` | `0x06` | LED/service krok, pak cekani na `IND_SW` |
+| `0x51FA -> 0x51FE` | `0x05` | LED/service krok, pak cekani na `IND_SW` |
+| `0x521E -> 0x5222` | `0x04` | LED/service krok, pak cekani na `IND_SW` |
+| `0x5236 -> 0x523A` | `0x03` | LED/service krok, pak cekani na `IND_SW` |
+| `0x5254 -> 0x5258` | `0x06` | LED/service krok, pak cekani na `IND_SW` |
+| `0x52B6 -> 0x52BA` | `0x03` | test/config sekvence |
+| `0x52C8 -> 0x52CC` | `0x06` | test/config sekvence |
+| `0x533A -> 0x533E` | `0x07` | LED pattern `LED1+LED2`, pak cekani |
+| `0x5350 -> 0x5354` | `0x0A` | LED pattern `LED2+LED3`, pak cekani |
+| `0x5368 -> 0x536C` | `0x0C` | LED pattern `LED3+LED4`, pak cekani |
+| `0x537A -> 0x537E` | `0x0A` | dalsi test krok |
+
+Pracovni zaver: `IND_SW` nespousti samostatny LED driver, ale krokuje service/LED pattern automat `0x213C` pres nastaveni stavu funkci `0x2120`.
+
 ## Mapovani BMS -> service state
 
 Funkce `0x56AE` mapuje BMS stav a mereni na service state pres `0x2120`.
@@ -292,6 +435,24 @@ Funkce `0x56AE` mapuje BMS stav a mereni na service state pres `0x2120`.
 | `0x4BC(cell_voltage)` vrati `2` | `0x82` |
 | `0x4BC(cell_voltage)` vrati `1` | `0x81` |
 | default | `0x80` |
+
+Toto mapovani je dynamicky overitelne pres emulator:
+
+```powershell
+python tools\pbp005_emulator.py bms-map --bms-state 0xff --cell-mv 3700
+python tools\pbp005_emulator.py bms-map --bms-state 0xfe --cell-mv 3700
+python tools\pbp005_emulator.py bms-map --bms-state 0x01 --flag-byte 0x08 --special-flag 1
+python tools\pbp005_emulator.py bms-map --bms-state 0x03 --extra-arg 3
+```
+
+Potvrzene vystupy:
+
+| Test | Service state |
+| --- | --- |
+| `bms_state=0xFF` | `0x02` |
+| `bms_state=0xFE` | `0x80` |
+| `flag_byte bit3 + special_flag=1` | `0x87` |
+| `bms_state=0x03 + extra_arg=3` | `0x8C` |
 
 ## Python skript
 
@@ -334,11 +495,18 @@ Negativni dukazy:
 - `0x213C` ma jediny caller `0x4CF2` z periodicke tick funkce.
 - Setter `0x2120` ma mnoho internich BMS calleru a nastavuje service state/timeouts, ne prijaty UART ramec.
 - UART/ring-buffer funkce kolem `0x31A2/0x31C8/0x331E/0x334A` jsou pouzite pro logger/byte pump, ale nebyl nalezen PBP004-like frame parser s hlavickou `0x46`, CRC a request dispatch tabulkou.
+- Call graph po doplneni emulatoru:
+  - `RingBuffer_GetByte 0x334A` vola pouze `0x33F8` uvnitr `0x33CC`.
+  - `UART_ServicePump_RxTx 0x33CC` ma jediny BL caller `0x16CE` uvnitr `0x16BA`.
+  - `0x16BA` vola `0x33CC` s `r2 = 0`, tedy bez RX ring descriptoru.
+  - Dynamicky `uart-runtime-pump --rx "46 01 02"` konci `rx_dropped=3`, zatimco harness-only `uart-pump` umi stejna data vlozit do umeleho RX ring bufferu.
+  - Scan instrukci nenasel `cmp #0x46`.
 
 Pracovni zaver:
 
 ```text
 PBP005 ma pasivni UART log a service/GPIO pattern automat.
+Low-level RX pump existuje, ale firmware ji v potvrzene runtime ceste nepripojuje k zadnemu RX parseru.
 Aktivni D-tech auth/fixture protokol jako u PBP004 neni potvrzen.
 ```
 
@@ -370,3 +538,16 @@ Vybrane PBP005 log stringy:
 - `!Slp %u`
 - `HB %u mx %u-%4dmV mn %u-%4dmV %dC %7dmA %7dmA`
 - `PS:%u %u`
+
+UART/log cestu lze dynamicky testovat v emulatoru:
+
+```powershell
+python tools\pbp005_emulator.py log-text --text "AINT:0x%X" --arg 0x9082
+python tools\pbp005_emulator.py uart-pump --rx "46 01 02" --tx ascii:OK
+```
+
+Pracovni stav:
+
+- `0x15C6` char sink je emulovan jako vystup do `uart_tx`.
+- `0x165C` debug logger je stubovan formatterem pro bezne `%u/%d/%X/%x/%s/%c`.
+- `0x33CC` UART service pump umi presouvat bajty mezi emulovanymi RX/TX ring buffery a `uart_tx`.
