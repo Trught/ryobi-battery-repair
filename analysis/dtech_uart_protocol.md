@@ -166,7 +166,7 @@ Podle PBP004 dispatcheru `0x36AC`:
 | --- | --- |
 | `0x01` | Fixture auth request |
 | `0x03` | Request s 32bit hodnotou `payload[1..4]`, vyzaduje delku/arg `5`, porovnava threshold `0x54A48E01`, vola `0x494E` |
-| `0x04` | Vyzaduje arg/delku `0x29`, vola `0x3878`, `0x4040`, `0x3F64`, `0x3918`; muze byt barcode/config update, neni read-only |
+| `0x04` | Vyzaduje arg/delku `0x29`, vola `0x3878`, `0x4040`, `0x3F64`, `0x3918`; kopiruje `payload[1..0x28]` do `0x10000028`, pres `0x4040` zapisuje marker/config word do `0x10000004` s low byte `0x5A`, potom muze zapsat NVM `0x7E00..0x7E93`; neni read-only |
 | `0x05..0x08` | Posila jednoduchou odpoved/error pres `0x202E(1)` |
 | `0x09` | Posle ack, delay `0x7D0`, vola `0x4998(0x40)` a `0x4A1E` |
 | `0x0A` | Kopiruje 3 bloky po `0x2A` bajtech do payloadu, potom send delka `0x7F` |
@@ -231,6 +231,7 @@ Priklad offline mapy PBP002/PBP005 stavu:
 python tools\dtech_uart.py pbp002-map
 python tools\dtech_uart.py pbp002-map --state 0x8c
 python tools\dtech_uart.py pbp004-requests
+python tools\dtech_uart.py --profile pbp004 --port COM5 --baud 115200 --verbose pbp004-read-blocks
 python tools\dtech_uart.py pbp005-map
 python tools\dtech_uart.py pbp005-map --state 0x8c
 python tools\dtech_uart.py --profile pbp002 decode-log "FOV"
@@ -243,6 +244,7 @@ Skript podporuje:
 - `raw` - jeden rucne zadany PBP004 ramec
 - `listen` - vypis prijatych PBP004 D-tech ramcu
 - `listen-log` - pasivni ASCII log, hlavne pro PBP002/PBP005
+- `pbp004-read-blocks` - PBP004-only bezpecnejsi cesta: auth a potom pouze fixture request `0x0A` read kandidat
 - `pbp002-map` - offline mapa PBP002 BMS/service stavu
 - `pbp004-requests` - offline mapa PBP004 D-tech transport opcodes a fixture requestu
 - `pbp005-map` - offline mapa PBP005 BMS/service stavu
@@ -314,6 +316,8 @@ Pro prvni testy neposilat requesty, ktere mohou menit stav nebo NVM:
 
 Nejbezpecnejsi poradi:
 
-1. `listen`
-2. `auth` s verbose logem
-3. pouze cteci requesty po dalsim rozebrani odpovedi
+1. `listen-log` pro ASCII debug vystup, pokud je log aktivni.
+2. `listen` pro pasivni PBP004 D-tech frame capture.
+3. `auth` s verbose logem jen na PBP004.
+4. `pbp004-read-blocks` jako jediny pripraveny read-like aktivni request.
+5. `raw` pouzivat jen pro rucne zkontrolovane testy mimo bezpecny rezim.

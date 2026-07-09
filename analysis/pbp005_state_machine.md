@@ -83,11 +83,64 @@ Event latch base:
 
 | Latch offset | Fault bit | Stav poznani |
 | --- | --- | --- |
-| `+1` | `0x40` | potvrzeno logem `ADOC`; pred nastavenim se vola `0x1D60(2)`, tj. komunikace se slave `0x29` |
+| `+1` | `0x40` | `ADOC`; AFE/OZ3705 status `0x02 & 0x1000`, potvrzovano pres `0x1D60(2)` |
 | `+3` | `0x20` | nastavuje handler `0x4DFE`; vola helper `0x5488`, ktery nastavuje `0x10000405 = 1`; wake/low-power runtime flag |
 | `+4` | `0x02` | teplotni/rozsahovy event kandidat |
 
 PBP005 lockout dump ma `0x7E94 = 40 00 00 00`, tedy aktivni bit `0x40`.
+
+### Bit 0x40 / ADOC zpresneni
+
+`0x40` je potvrzeny `ADOC` event od AFE/OZ3705 status registru, ne samostatny MCU-only latch.
+
+Klicove funkce:
+
+| Adresa | Pracovni nazev | Vyznam |
+| --- | --- | --- |
+| `0x17AC` | `AFE3705_ReadRegister16_PEC` | Cte word z AFE `0x29`, kontroluje PEC. |
+| `0x19B6` | `AFE3705_ClearStatus02_AllOnes` | Zapisuje `0x02 = 0xFFFF`, clear/ack status kandidat. |
+| `0x1D48` | `AFE3705_Is_ADOC_Status_Set` | Cte `0x02` a vraci bit `0x1000`. |
+| `0x1D60` | `AFE3705_ClearAndConfirm_ADOC` | Smycka: zapis `0x02 = 0xFFFF`, read `0x02`, test `0x1000`, max pocet pokusu z parametru. |
+| `0x1DFC` | `AFE3705_Read_Status02_ToPtr` | Cte `0x02` do predaneho pointeru; pouzito pro log `AINT:0x%X`. |
+| `0x4DB8` | `ADOC_Interrupt_Handler` | Na interruptu vola `0x1D60(2)` a pri potvrzeni nastavuje latch `0x100003C8+1`. |
+
+`0x1D48`:
+
+```c
+uint16_t st = AFE_ReadWord(0x02);
+return (st & 0x1000) != 0;
+```
+
+`0x1D60(tries)`:
+
+```c
+status = 0x1000;  // lokalni pocatecni stav: bit je povazovan za aktivni
+for (i = 0; (status & 0x1000) != 0; i++) {
+    AFE_WriteWord(0x02, 0xFFFF);
+    status = AFE_ReadWord(0x02);
+
+    if (i >= tries || read_error)
+        return 1;  // stale potvrzeno / nelze clear
+}
+return 0;          // status bit zmizel
+```
+
+Main smycka ma dve cesty na `0x40`:
+
+1. Latch cesta:
+   - `0x4DB8` nastavi `latch[1] = 1`, pokud `0x1D60(2)` potvrdi status.
+   - Main kolem `0x4696` cte `latch[1]`, nuluje ho, nastavuje `ctx+0x08 |= 0x40` a loguje `ADOC`.
+2. Polling cesta:
+   - Main kolem `0x46BE` vola `0x1DFC` a loguje `AINT:0x%X`.
+   - Potom vola `0x1D48`; pokud status `0x02 & 0x1000`, nastavuje `ctx+0x08 |= 0x40`.
+   - Nasledne `0x19B6` zapisuje `0x02 = 0xFFFF`, tedy clear/ack status kandidat.
+
+Zachyceny normalni I2C sniff mel `0x02 = 0x8082`, tedy bit `0x1000` nebyl nastaven.
+Proto je nejpresnejsi pracovni vyznam PBP005 fault bitu `0x40`:
+
+```text
+ADOC = AFE/OZ3705 status 0x02 bit 12 / mask 0x1000, discharge-over-current notification kandidat.
+```
 
 ### Bit 0x20 a wake/low-power flag
 
@@ -111,6 +164,37 @@ Sousedi tohoto flagu:
 - `0x10000405` se nastavuje pri wake/low-power eventu.
 
 To potvrzuje, ze fault bit `0x20` neni primarni AFE measurement fault. Je to event/wake/low-power cesta, ktera se muze zapsat do persistentni historie.
+
+## RAM markery
+
+PBP005 pouziva stejne dva RAM markery v bloku `0x10000000`:
+
+| Funkce | Vyznam |
+| --- | --- |
+| `0x2EB8` | nastavi `[0x10000000+4]` a `[0x10000000+5]` na `0x5A` |
+| `0x2EC2` | vraci 1, pokud `[0x10000000+4] != 0xA5` |
+| `0x2ED2` | vraci 1, pokud `[0x10000000+5] != 0xA5` |
+
+Init/default cesta:
+
+```text
+0x44A4 -> 0x26B4
+0x44A8 -> 0x2EB8  // reset markeru na 5A/5A
+0x44AC -> 0x2728
+```
+
+Vychozi NVM obraz ma na `0x7E04/0x7E05` hodnoty `5A 5A`.
+Primy zapis konstanty `0xA5` do `0x10000004/05` zatim nebyl v PBP005 nalezen.
+
+Pouziti markeru ve fault vetvich:
+
+| Marker helper | Call-site | Podminka | Log / fault |
+| --- | --- | --- | --- |
+| `0x2EC2` | `0x47CA` | max/cell napeti `>= 0x10CC` / cca 4300 mV a marker A neni `0xA5` | `EOVs`, potom bit `0x04` |
+| `0x2ED2` | `0x4840` | min/cell napeti pod limitem, mimo stavy `0x02/0x03`, marker B neni `0xA5` | `EUVs`, potom bit `0x08` |
+| `0x2ED2` | `0x48BA` | teplota `>= 0x55` / 85 C a marker B neni `0xA5` | `EOTs`, potom bit `0x02` |
+
+To je drobny rozdil proti PBP002/PBP004: PBP005 marker B gateuje nejen under-voltage, ale i over-temperature vetev.
 
 ## Service/fixture automat 0x213C
 
@@ -238,6 +322,26 @@ python tools\dtech_uart.py decode-log "F2Flsh:x40"
 
 Aktivni `auth` a `raw` jsou pro `--profile pbp005` schvalne blokovane, protoze PBP005 auth/parser neni staticky potvrzen.
 
+## PBP005 D-tech / service zaver
+
+PBP005 zatim nema staticky potvrzeny PBP004-style D-tech packet parser.
+
+Negativni dukazy:
+
+- PBP004 obsahuje mnoho `D-tech ...`, `Auth ...`, `Fixture ...` stringu; PBP005 neobsahuje zadny takovy D-tech/auth/fixture string.
+- PBP004 fixture key `C2 C7 60 7A B5 8F 44 D2 4E 7A` je jen v PBP004 na `0x705C`; v PBP005 neni.
+- PBP004 parser `0x1D2E` nema v PBP005 analogii; PBP005 oblast `0x1D2E` patri AFE/balance/status I2C kodu.
+- `0x213C` ma jediny caller `0x4CF2` z periodicke tick funkce.
+- Setter `0x2120` ma mnoho internich BMS calleru a nastavuje service state/timeouts, ne prijaty UART ramec.
+- UART/ring-buffer funkce kolem `0x31A2/0x31C8/0x331E/0x334A` jsou pouzite pro logger/byte pump, ale nebyl nalezen PBP004-like frame parser s hlavickou `0x46`, CRC a request dispatch tabulkou.
+
+Pracovni zaver:
+
+```text
+PBP005 ma pasivni UART log a service/GPIO pattern automat.
+Aktivni D-tech auth/fixture protokol jako u PBP004 neni potvrzen.
+```
+
 ## Logger
 
 PBP005 logger:
@@ -258,6 +362,9 @@ Vybrane PBP005 log stringy:
 - `DPDWAKE`
 - `ADOC`
 - `AINT:0x%X`
+- `EOVs` - over-voltage set/event, fault bit `0x04`
+- `EUVs` - under-voltage set/event, fault bit `0x08`
+- `EOTs` - over-temperature set/event, fault bit `0x02`
 - `WFLR:x%X`
 - `F2Flsh:x%X`
 - `!Slp %u`

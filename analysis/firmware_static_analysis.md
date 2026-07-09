@@ -81,6 +81,57 @@ Pracovni vyznam fault bitu:
 | bit 6 | `0x40` | PBP002: persistentni fault nastavuje `0x0900` jako `EUV Flag`; nejlepsi vyklad extreme under-voltage (`min < 1000 mV`, timer 1000). PBP005 lockout: potvrzeno jako `ADOC` event podle log stringu `ADOC`. |
 | bit 7 | `0x80` | PBP002: nebyl nalezen setter do `ctx+0x3B`; hodnota se pouziva jako timer/service/runtime flag, ne jako potvrzeny persistentni fault bit. |
 
+## Slovnik diagnostickych zkratek
+
+Tyto nazvy jsou pracovni, odvozene ze stringu ve firmware a statickych call-site. Oficialni expanze neni potvrzena datasheetem vyrobce.
+
+### Napeti / teplota / unbalance
+
+| Zkratka | Modely / log | Pracovni vyznam | Vazba na fault bit / podminku |
+| --- | --- | --- | --- |
+| `FOV` | PBP002/PBP004 | Fault Over Voltage | `0x04`; marker A `[0x10000004] != 0xA5` a vysoke cell napeti, limit kolem `0x10CC` / 4300 mV, counter prah `0xC9`. |
+| `FUV` | PBP002/PBP004 | Fault Under Voltage | `0x08`; marker B `[0x10000005] != 0xA5` a nizke cell napeti, mimo stavy `0x02/0x03`, counter prah `0xC9`. |
+| `FOT` | PBP002/PBP004 | Fault Over Temperature | `0x02`; teplotni hodnota kolem `>= 0x55` / 85 C po timeoutu/counteru. |
+| `EOVs` | PBP005 | Event Over Voltage set | `0x04`; marker A `[0x10000004] != 0xA5`, max/cell napeti `>= 0x10CC` / cca 4300 mV, timerovana vetev. |
+| `EUVs` | PBP005 | Event Under Voltage set | `0x08`; marker B `[0x10000005] != 0xA5`, min/cell napeti pod limitem, mimo stavy `0x02/0x03`, timerovana vetev. |
+| `EOTs` | PBP005 | Event Over Temperature set | `0x02`; marker B `[0x10000005] != 0xA5`, teplota `>= 0x55` / 85 C, timerovana vetev. |
+| `EUB Time St` | PBP002 | Event/Excessive UnBalance timer start | Start timeru pro cell-unbalance; podminka `max-min >= 401 mV` a `min >= 3301 mV`. |
+| `EUB Flag` | PBP002 | Event/Excessive UnBalance fault flag | `0x20`; cell-unbalance fault po timeru 2500. |
+| `EUV Time St` | PBP002 | Extreme Under Voltage timer start | Start timeru pro severe/extreme under-voltage; podminka `min < 1000 mV`. |
+| `EUV Flag` | PBP002 | Extreme Under Voltage fault flag | `0x40`; severe/extreme under-voltage fault po timeru 1000. |
+
+Poznamka k prefixum:
+
+- `F*` stringy u PBP002/PBP004 oznacuji primo fault vetve (`FOV/FUV/FOT`).
+- `E*...s` stringy u PBP005 oznacuji set/event vetve pred nebo pri nastaveni odpovidajiciho fault bitu (`EOVs/EUVs/EOTs`).
+- `EUV` se pouziva ve dvou kontextech: PBP005 `EUVs` = bezne under-voltage event `0x08`, zatimco PBP002 `EUV Flag` = extreme/severe under-voltage `0x40`.
+
+### Proud / AFE / runtime
+
+| Zkratka | Pracovni vyznam | Poznamka |
+| --- | --- | --- |
+| `DOC` | Discharge Over Current | Kandidat pro bit `0x10`; recovery/clear log je `DOCRc`. |
+| `DOCRc` | Discharge Over Current Recovery/Clear | Recovery/clear cesta pro DOC kandidata. |
+| `ADOC` | AFE Discharge Over Current / AFE DOC event kandidat | PBP005 `0x40`; potvrzeno jako AFE/OZ3705 status `0x02 & 0x1000`, loguje se pri latch/polling ceste. |
+| `ADOC_E` | ADOC recovery/error/exit kandidat | Recovery/clear souvisejici s ADOC cestou. |
+| `AFEPNR` | AFE Power Not Ready kandidat | AFE/3705T neni v power-ready stavu. |
+| `AFENR` | AFE Not Ready kandidat | AFE/3705T neni ready. |
+| `AFECommErr(V)` | AFE communication error pri voltage mereni | Souvisi s measurement/fault bit `0x01` kandidatem. |
+| `AFECommErr(I)` | AFE communication error pri current mereni | Souvisi s measurement/fault bit `0x01` kandidatem. |
+| `AFERc` | AFE Recovery/Clear kandidat | Recovery/clear cesta AFE chyby. |
+| `ChgWkI` | Charger/Wake Interrupt kandidat | Wake/charger event log. |
+| `ChgV: %dmV %d fail` | Charge Voltage fail | Charge-voltage validation selhani; loguje mV a pocitadlo/stav. |
+| `DPDWAKE` | Deep Power Down Wake | Wake z low-power/deep-power-down stavu. |
+| `Bal%u>%u` | Balancing start | Start balancingu; loguje `max_cell_mv > min_cell_mv`. |
+| `Bal Dn` | Balancing Done | Konec balancingu; firmware zapisuje AFE `0x0E = 0xFFC0`. |
+| `BCHR_FV:%d` | Battery Charger Full Voltage kandidat | Charge/full-voltage threshold log. |
+| `cllV>CFV` | Cell Voltage greater than Charge Full Voltage | Log pri prekroceni charge/full-voltage prahu clankem. |
+| `SCc` | Service/Charger check kandidat | Kratky service/charger pulse/check helper. |
+| `WFLR:x%X` | Word Fault/Lockout Related kandidat | Log fault wordu pred/okolo persistence. |
+| `F2Flsh:x%X` | Fault To Flash | Fault word zapisovany do NVM `0x7E94`. |
+| `Fail:x%X` | Failure/status bitmask | Obecny failure/status log. |
+| `PS:%u %u` | Power/Service State | Stavovy log service/runtime automatu. |
+
 ### PBP005 fault/event doplneni
 
 PBP005 hlavni runtime smycka zacina realne kolem `0x4268` (`App_Main_StateMachine` telo).
@@ -107,7 +158,7 @@ Zjistene latch offsety:
 | Offset | Kdo nastavuje | Jak se projevi |
 | --- | --- | --- |
 | `+0` | interrupt handler `0x4D9C` | hlavni smycka nastavi fault bit `0x10` |
-| `+1` | interrupt handler `0x4DB8` | hlavni smycka nastavi fault bit `0x40` a loguje `ADOC` |
+| `+1` | interrupt handler `0x4DB8` | potvrzuje AFE status `0x02 & 0x1000`; hlavni smycka nastavi fault bit `0x40` a loguje `ADOC` |
 | `+3` | interrupt handler `0x4DFE` | hlavni smycka nastavi fault bit `0x20` |
 | `+4` | handler `0x4D80/0x4D90` | hlavni smycka nastavi fault bit `0x02` |
 | `+5` | handler `0x4D58` | wake/fixture/auth related latch, cteno v main smycce |
@@ -120,7 +171,9 @@ Interrupt vector table PBP005:
 | `0xAC` | `0x4DB9` -> `0x4DB8` | kontroluje `0x1D60(2)`, pri potvrzeni nastavuje latch `0x100003C8+1`, tj. fault bit `0x40/ADOC` |
 
 `0x4DB8` pred nastavenim ADOC vola `0x1D60(2)`, ktere komunikuje se slave `0x29`.
-To podporuje interpretaci, ze `0x40` je AFE/over-current stav potvrzeny pres externi merici/AFE IC.
+`0x1D60` opakovane zapisuje `0x02 = 0xFFFF`, cte `0x02` a testuje masku `0x1000`.
+`0x1D48` je jednodussi polling test stejne masky `0x1000`.
+To potvrzuje interpretaci, ze PBP005 `0x40/ADOC` je AFE/OZ3705 status `0x02` bit 12, discharge-over-current notification kandidat.
 
 `0x4DFE` nastavuje `0x100003C8+3`, vola `0x5488`, a upravuje register `0x40008000` (`REG = (REG & 0x07) | 0x02`).
 `0x5488` nastavuje `*(uint8_t *)0x10000405 = 1`.
@@ -177,15 +230,9 @@ Tento flag je modelovy ekvivalent PBP005 `0x10000405`.
 
 ## RAM markery
 
-| Funkce | Nazev | Vyznam |
-| --- | --- | --- |
-| `FUN_00002f54` | `Set_Markers_To_5A` | Nastavi marker `[base+4]` a `[base+5]` na `0x5A`. |
-| `FUN_00002f5e` | `Is_Marker4_Not_A5` | Vraci 1, pokud `[base+4] != 0xA5`. |
-| `FUN_00002f6e` | `Is_Marker5_Not_A5` | Vraci 1, pokud `[base+5] != 0xA5`. |
+RAM base helperu ukazuje na `0x10000000`.
 
-`DAT_00002f80` pravdepodobne ukazuje na `0x10000000`.
-
-Tedy:
+Tedy ve vsech aktualne analyzovanych modelech:
 
 - `0x10000004` = marker A
 - `0x10000005` = marker B
@@ -195,21 +242,28 @@ Marker logika:
 - `0x5A` = resetovany / nepotvrzeny stav
 - `0xA5` = potvrzeny / OK stav
 
-Zatim neni jasne, ktera funkce nastavuje marker na `0xA5`. Primy scalar search nasel `0xA5` jen v porovnani, ne v primem zapisu.
+Vychozi NVM obraz u PBP002/PBP004/PBP005 obsahuje na `0x7E04/0x7E05` hodnoty `5A 5A`. Boot/runtime inicializace tyto RAM markery znovu nastavuje na `0x5A`.
 
-### PBP005 marker doplneni
+Modelove helpery:
 
-PBP005 funkce:
+| Model | Set `5A/5A` | Test marker A | Test marker B | Dalsi zapis do `+4/+5` |
+| --- | --- | --- | --- | --- |
+| PBP002 | `0x2F54`, volano z init vetve `0x43CE` | `0x2F5E` = `[+4] != 0xA5` | `0x2F6E` = `[+5] != 0xA5` | nenalezen |
+| PBP004 | `0x4046`, volano z init vetve `0x5574` | `0x4050` = `[+4] != 0xA5` | `0x4060` = `[+5] != 0xA5` | `0x4040` zapisuje 32bit word do `[0x10000000+4]`; vola ho D-tech fixture request `0x04` kolem `0x3784`, v teto vetvi je low byte vynucen na `0x5A` |
+| PBP005 | `0x2EB8`, volano z init vetve `0x44A8` | `0x2EC2` = `[+4] != 0xA5` | `0x2ED2` = `[+5] != 0xA5` | nenalezen |
 
-| Adresa | Vyznam |
-| --- | --- |
-| `0x2EB8` | nastavi `[0x10000000+4]` a `[0x10000000+5]` na `0x5A` |
-| `0x2EC2` | vraci 1, pokud `[0x10000000+4] != 0xA5` |
-| `0x2ED2` | vraci 1, pokud `[0x10000000+5] != 0xA5` |
+Nebyl nalezen primy lokalni zapis konstanty `0xA5` do `0x10000004/05`.
+Nejsilnejsi aktualni zaver je, ze `0xA5` nevznika autonomne v beznem runtime; pokud se v realne baterii objevi, nejspis prichazi ze servisni/factory konfigurace nebo z kopirovane NVM/config oblasti.
 
-Zatim nebyl nalezen zadny primy zapis konstanty `0xA5` do techto offsetu.
-V PBP005 se base `0x10000000` pouziva jako vetsi RAM config/state blok, takze offsety `+4/+5` nejsou izolovane pouze marker promenne.
-Aktualni kandidat je, ze potvrzeni `0xA5` prichazi z externiho/protokoloveho toku nebo z kopirovane konfigurace, ne z jednoduche hardcoded lokalni funkce.
+PBP004 je v tomto smeru dulezita vyjimka: helper `0x4040` zapisuje cely 32bit word do `0x10000004`. Volani z D-tech requestu `0x04` proto muze ovlivnit markery i sousedni bajty `+6/+7`, ale tato konkretni vetev staticky vynucuje nejspodnejsi bajt zapisovaneho wordu na `0x5A`, ne `0xA5`. Request `0x04` tedy neni read-only, ale zatim neni potvrzen jako `0xA5` setter.
+
+Fault vazba:
+
+- PBP002/PBP004 marker A + vysoke napeti po `0xC9` cyklech nastavuje `0x04/FOV`.
+- PBP002/PBP004 marker B + nizke napeti po `0xC9` cyklech nastavuje `0x08/FUV`.
+- PBP005 marker A + over-voltage vetvi pres timer a log `EOVs`, pote nastavuje bit `0x04`.
+- PBP005 marker B + under-voltage vetvi pres timer a log `EUVs`, pote nastavuje bit `0x08`.
+- PBP005 marker B se pouziva i v over-temperature vetvi `>= 85 C`, log `EOTs`, pote nastavuje bit `0x02`.
 
 ## Merici / AFE / SMBus vrstva
 
@@ -221,7 +275,7 @@ Aktualni kandidat je, ze potvrzeni `0xA5` prichazi z externiho/protokoloveho tok
 | `FUN_000033a4` | `CRC8_PEC` | Vypocet CRC-8 PEC s polynomem `0x07`, typicke pro SMBus PEC. |
 | `FUN_00003664` | `SMBus_Transfer` | Obal pro SMBus/I2C transakci. Parametry: bus, adresa, TX buffer, TX delka, RX buffer, RX delka. |
 | `FUN_00003de4` | `I2C_RunTransfer_Blocking` | Blokujici/pollovaci obal nad realnym I2C stavovym automatem. |
-| `FUN_00003ce0` | nezname | Skutecny nizkourovnovy I2C/SMBus state machine. |
+| `FUN_00003ce0` | `I2C_WriteTxDat_Burst4` | Rychla TX cast I2C/USART-like periferie; zapisuje az 4 bajty do TXDAT. Vlastni state-machine krok je PBP005 `0x3DAC`. |
 
 Zarizeni:
 
@@ -237,7 +291,7 @@ Potvrzena pracovni register mapa podle firmware a `files/ryobi_battery_i2c_read.
 | `0x02` | status/protection register kandidat |
 | `0x03` | config/control register kandidat |
 | `0x05` | init/power/control write `0x0010` |
-| `0x0E` | status/event clear or mask, periodicky write `0xFFC0` |
+| `0x0E` | cell-balance control kandidat; `0xFFC0` = balance off, `0xFFC0 | (1 << cell_index)` = balance cell kandidat |
 | `0x20` | NTC/temperature ADC kandidat |
 | `0x21..0x25` | pet cell-voltage kanalu, raw12 prepocet `raw * 5 / 4` |
 | `0x27` | current/shunt ADC kandidat |
@@ -276,9 +330,43 @@ Relevantni PBP005 funkce:
 | --- | --- | --- |
 | `0x36F8` | `SMBus_Transfer` | Sestavi stack descriptor, vybere I2C base podle bus id, vola `0x3EA2`. Pri chybe manipuluje IRQ/clock maskami. |
 | `0x3EA2` | `I2C_RunTransfer_Blocking` | Blocking/polling transfer loop. Volá `0x3E68` init/reset a opakovane `0x3DAC` krok transferu, dokud `descriptor.status` neni hotovy. |
-| `0x3DAC` | `I2C_TransferStep` kandidat | Vlastni krok state machine podle status bitu a descriptoru. |
+| `0x3DAC` | `I2C_TransferStep` | Vlastni krok state machine podle status bitu a descriptoru. |
+| `0x3E68` | `I2C_StartTransfer` | Inicializuje descriptor status na `0xFF`, zapisuje prvni address byte do `base+0x28`, posila START pres `base+0x20 = 2`. |
 | `0x3CE0` | `I2C_WriteTxDat_Burst4` | Rychly TX path, zapisuje do registru `base+0x1C`. |
 | `0x3F38` | `I2C_PinMuxClock_Init` kandidat | Konfiguruje IOCON/SYSCON pro I2C/UART periferie. |
+
+`0x3DAC` pouziva `descriptor.status` na offsetu `+0x0C`:
+
+| Status | Pracovni vyznam |
+| --- | --- |
+| `0xFF` | transfer bezi / not complete |
+| `0x00` | hotovo OK |
+| `0x01` | obecna/necekana state chyba |
+| `0x02` | NACK/error state kandidat |
+| `0x03` | status bit `0x40` error kandidat |
+| `0x04` | STOP/complete transition kandidat |
+| `0x05` | status bit `0x10` error kandidat |
+| `0x06` | status bit `0x01000000` error/arbitration/timeout kandidat |
+
+Krokova logika:
+
+- kontroluje error bity v `base+0x04` (`0x10`, `0x40`, `0x01000000`) a pri nich nastavuje status `5/3/6`
+- pokud je master pending bit aktivni, dekoduje stav z `((base->STAT >> 1) & 7)`
+- pri RX-ready vetvi cte byte z `base+0x28` do `rx_buf`, dekrementuje `rx_len`
+- pri TX-ready vetvi zapisuje dalsi byte z `tx_buf` do `base+0x28`, dekrementuje `tx_len`
+- po dopsani TX a pokud existuje RX delka posle opakovany START s read adresou `(slave_addr << 1) | 1`
+- po dokonceni bez chyby nastavuje status `0`
+
+`0x3EA2` je blocking wrapper:
+
+```c
+I2C_StartTransfer(base, desc);
+do {
+    done = I2C_TransferStep(base, desc);
+    // hlida take timeout/error flag souvisejici s 0x10000404
+} while (!done);
+return desc->status == 0;
+```
 
 Pouzite periferie/adresy:
 
@@ -289,6 +377,41 @@ Pouzite periferie/adresy:
 - `0x40068000`
 
 Pro SMBus slave `0x29` zustava interpretace `AFE` velmi silna podle logu `AFEPNR`, `AFENR`, `AFECommErr(I/V)`, `ADOC`.
+
+### Cell balancing pres AFE `0x0E`
+
+O2Micro katalog uvadi `OZ3705` jako 3-5 cell DFE s 12bit ADC, I2C a cell balance rizenym hostem pres I2C. To sedi na PBP005 `3705T` a na firmware zapis do commandu `0x0E`.
+
+PBP005:
+
+| Adresa | Pracovni nazev | Vyznam |
+| --- | --- | --- |
+| `0x0BF4` | `Balance_Control` | Rozhoduje start/stop balancingu podle min/max clanku. |
+| `0x1CDC` | `AFE3705_SetBalance_Control` | Zapise command `0x0E` hodnotou `0xFFC0` nebo `0xFFC0 | (1 << cell_index)`. |
+
+`0x0BF4` je volana z hlavniho automatu na `0x44C0`.
+
+Podminky startu PBP005 balancingu:
+
+```text
+min_cell_mv >= 0x0E61 = 3681 mV
+max_cell_mv - min_cell_mv >= 0x33 = 51 mV
+state == 1, nebo state == 2 a nizke 2 bity predaneho flag byte jsou 3
+```
+
+Po startu vola `0x1CDC(max_cell_index)`; index je nacten z measurement struktury na offsetu `+0x11`.
+Potom nastavi timer `500` ticku/cyklu a loguje `Bal%u>%u`.
+Po dobehnuti timeru vola `0x1CDC(0)`, tedy zapis `0x0E = 0xFFC0`, loguje `Bal Dn` a balance vypina.
+
+PBP002/PBP004 maji stejne balance stringy a analogicke funkce:
+
+```text
+PBP002 Balance_Control ~ 0x0E8C, callsite 0x43E8
+PBP004 Balance_Control ~ 0x0EF4, callsite 0x558E
+PBP005 Balance_Control   0x0BF4, callsite 0x44C0
+```
+
+Sniff `files/ryobi_battery_i2c_read.csv` obsahuje pouze `0x0E = 0xFFC0`, tedy zachytil stav bez aktivniho balancingu. To sedi s namerenym spreadem clanku jen `43.8..48.8 mV`, pod prahem `51 mV`.
 
 ## Logger / diagnosticky vystup
 
@@ -552,6 +675,7 @@ size == 0
 
 Zname adresy:
 
+- `0x7E00..0x7E93` = persistentni config/string/marker blok kopirovany z/do RAM `0x10000000`
 - `0x7E94` = persistent fault/status word
 - `0x7EC0` = config flags
 - `0x7EDC` = config hodnota sada 1 / A
@@ -565,6 +689,45 @@ Zname adresy:
 - `0x7EDC / 0x7EE0`
 - `0x7EE8 / 0x7EEC`
 
+### NVM/flash writer
+
+Vsechny tri modely maji stejnou logiku flash/NVM update po 64B blocich. Parametry jsou:
+
+```c
+NVM_UpdateWords(src_words, dst_addr, word_count);
+```
+
+`word_count` je pocet 32bit slov. Funkce:
+
+1. overi, ze `dst_addr >= 0x7E00` a ze je 4B zarovnana,
+2. vypocte dotcene 64B bloky,
+3. pro kazdy blok nacte existujici obsah, vlozi nove wordy,
+4. pokud se blok lisi, provede erase/program,
+5. po zapisu blok znovu porovna.
+
+Modelove adresy:
+
+| Model | Write helper | Read/copy helper | Flash prep/unlock kandidat | Erase kandidat | Program kandidat |
+| --- | --- | --- | --- | --- | --- |
+| PBP002 | `0x36F4` | `0x3838` | `0x3998` | `0x40FC` | `0x40D0` |
+| PBP004 | `0x4A48` | `0x4B42` | `0x4C5C` | `0x4A36` | `0x49E0` |
+| PBP005 | `0x3788` | `0x38C6` | `0x3A54` | `0x41B0` | `0x4184` |
+
+Zname write cesty do `0x7E00..0x7EFF`:
+
+| Cil | PBP002 | PBP004 | PBP005 | Vyznam |
+| --- | --- | --- | --- | --- |
+| `0x7E00..0x7E93` | `0x27EC -> 0x36F4(0x10000000,0x7E00,0x25)` | `0x3918 -> 0x4A48(0x10000000,0x7E00,0x25)` | `0x2728 -> 0x3788(0x10000000,0x7E00,0x25)` | Persistentni RAM config/string/marker blok. PBP004 request `0x04` nastavuje dirty flag a muze spustit tuto cestu. |
+| `0x7E94` | `0x4B66`, `0x4C02` | `0x5D16`, `0x5DB4` | `0x4C1C`, `0x4CA8` | Persistentni fault history word; zapis ve fault state `0xFF`, nejdrive aktualni fault + historie, potom posun historie. |
+| `0x7EC0` | `0x50EC`, `0x515E`, `0x517E`, `0x521E` | `0x5FD8`, `0x614A` a dalsi service/config vetve | `0x528C`, `0x52F6`, `0x5316`, `0x53C8` | Config flags; bity se ORuji s hodnotami typu `0x80000000` / `0x02000000`. |
+| `0x7EDC` | `0x5128 -> 0x4F70` | analog ve service/config vetvi | `0x52C0 -> 0x5014` | Config/calibration hodnota sada 1 / A. |
+| `0x7EE0` | `0x513A -> 0x4FAA` | analog ve service/config vetvi | `0x52D2 -> 0x504E` | Config/calibration hodnota sada 1 / B. |
+| `0x7EE4` | `0x51B6 -> 0x4F1E` | analog ve service/config vetvi | `0x535E -> 0x4FC2` | Dalsi config hodnota / threshold kandidat. |
+| `0x7EE8` | `0x51C8 -> 0x4F70` | `0x60F0 -> 0x4A48` | `0x5372 -> 0x5014` | Config/calibration hodnota sada 0 / A. |
+| `0x7EEC` | `0x51DA -> 0x4FAA` | `0x6128 -> 0x4A48` | `0x5384 -> 0x504E` | Config/calibration hodnota sada 0 / B. |
+
+Read-only diagnostika nesmi volat zadnou z techto cest. Bezpecnejsi jsou jen pasivni logy a explicitne cteci requesty.
+
 ## Dalsi identifikovane funkce
 
 PBP005 / souvisejici adresy:
@@ -572,8 +735,8 @@ PBP005 / souvisejici adresy:
 | Adresa | Pracovni nazev | Vyznam |
 | --- | --- | --- |
 | `0x33CC` | `UART_ServicePump_RxTx` | Presouva data mezi USART RX/TX a ring buffery. Potvrzuje aktivni vstup `D-RX`. |
-| `0x213C` | `DTech_Service_StateMachine` | Service/fixture protokol FSM nad UARTem. Stav struct `0x10000230`. |
-| `0x2120` | `DTech_SetState_WithTimeout` | Nastavi stav ve strukture `0x10000230`, armuje timeout objekt na `+8`. |
+| `0x213C` | `Service_GPIO_StateMachine` | Service/fixture/GPIO pattern FSM. Stav struct `0x10000230`. Neni potvrzen jako D-tech packet parser. |
+| `0x2120` | `Service_SetState_WithTimeout` | Nastavi stav ve strukture `0x10000230`, armuje timeout objekt na `+8`. |
 | `0x206E` | `Fixture_AuthWindow_Check` | Auth-window gate, pouziva `0x100003B0`. |
 | `0x2600` | `DTech_SendPulseOrResponsePattern` | Delay/toggle/state byte, pravdepodobne vystupni odezva/pattern. |
 | `0x26A0` | `Load_Defaults_And_NVM_Config` | Inicializuje RAM blok `0x10000000` z defaults a NVM. |
@@ -741,19 +904,16 @@ Pro prakticky test plati:
 Nejdulezitejsi nezname:
 
 1. Oficialni expanze zkratky `EUB`; prakticky vyznam je uz posunuty na cell-unbalance fault (`max-min >= 401 mV`, `min >= 3301 mV`, timer 2500).
-2. Presny vyznam fault bitu `0x40` u PBP005 lockout. Posunuto: log string potvrzuje `ADOC`, zbyva presne rozlisit, zda je to abnormal discharge over-current, AFE interrupt konkretniho typu, nebo board-level ADOC latch.
-3. Kde se marker `0x10000004` nebo `0x10000005` nastavuje na `0xA5`.
-4. Plny obsah `FUN_00003ce0` = nizkourovnovy SMBus/I2C state machine.
+2. Oficialni vyznam nazvu `ADOC` u PBP005; staticky je potvrzen AFE/OZ3705 status `0x02 & 0x1000`, discharge-over-current notification kandidat.
+3. Prakticky overit zdroj marker hodnoty `0xA5`: u PBP004 request `0x04` vola `0x4040`, ale v teto vetvi staticky vynucuje low byte `0x5A`; potvrzeny `0xA5` setter zatim neni nalezen u zadneho modelu.
+4. Prakticky overit PBP004 read-like fixture request `0x0A` proti realne baterii; staticky kopiruje tri bloky po `0x2A` bajtech a posila delku `0x7F`.
 5. Presny vyznam stavu `0x00`, `0x01`, `0x02`, `0x03`, `0xFE`, `0xFF`.
-6. Oficialni vendor/datasheet pro AFE `3705T` na SMBus adrese `0x29` a presne nazvy/status bity registru `0x02`/`0x0E`.
-7. Zda PBP005 pouziva stejny D-tech fixture key jako PBP004. Posunuto: stejny key ani stejna auth-loop smycka nebyly v PBP005 nalezeny.
+6. Plny datasheet/register mapa pro O2Micro `OZ3705` / board marking `3705T`, hlavne oficialni nazvy registru `0x02` a `0x0E`.
+7. Zda PBP005 ma nejaky jiny aktivni service protokol mimo PBP004-style D-tech. PBP004 fixture key, auth stringy ani packet parser nebyly v PBP005 nalezeny.
 8. Prakticke overeni D-tech CRC a auth proti realne baterii.
 9. Prakticky overit, zda se PBP002 persistentni fault bit `0x80` v realnych dumpech vubec objevi; staticky nebyl nalezen zadny normalni setter do `ctx+0x3B`.
 
 Nejlepsi dalsi funkce k rozebrani:
 
-- `FUN_00003ce0` - skutecny I2C/SMBus state machine
 - `FUN_000015ac` - fyzicky diagnosticky vystup/log, pro modely mimo PBP005
-- PBP005 funkce zapisujici do fault/event byte s maskami `0x20` a `0x40`
-- funkce zapisujici do RAM `0x10000004/0x10000005`
-- PBP005 ekvivalent PBP004 `0x36AC` kvuli overeni fixture key
+- doplnit oficialni nazvy PBP005 I2C status/error bitu podle datasheetu AFE/OZ3705 nebo MCU I2C periferie

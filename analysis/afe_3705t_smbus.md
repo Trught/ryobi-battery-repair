@@ -59,6 +59,36 @@ Overene vzorky z `files/ryobi_battery_i2c_read.csv`:
 | read `0x21 -> 0xFC72` | `52 21 53 FC 72` | `CE` |
 | read `0x20 -> 0xFBBF` | `52 20 53 FB BF` | `DE` |
 
+## PBP005 I2C state machine
+
+Relevantni firmware funkce:
+
+| Adresa | Pracovni nazev | Vyznam |
+| --- | --- | --- |
+| `0x36F8` | `SMBus_Transfer` | Sestavi transfer descriptor a vola blocking runner. |
+| `0x3E68` | `I2C_StartTransfer` | Nastavi `descriptor.status = 0xFF`, zapise prvni address byte do `base+0x28`, posle START pres `base+0x20 = 2`. |
+| `0x3DAC` | `I2C_TransferStep` | Jeden krok podle status/error bitu a `MSTSTATE` z `base+0x04`. |
+| `0x3EA2` | `I2C_RunTransfer_Blocking` | Smycka nad `0x3DAC`; vraci success, pokud finalni `descriptor.status == 0`. |
+
+Descriptor offsety:
+
+| Offset | Vyznam |
+| --- | --- |
+| `+0x00` | TX buffer pointer |
+| `+0x04` | RX buffer pointer |
+| `+0x08` | TX length |
+| `+0x0A` | RX length |
+| `+0x0C` | status (`0xFF` bezi, `0x00` OK, jina hodnota chyba/stav) |
+| `+0x0D` | 7bit slave address |
+
+Krok `0x3DAC`:
+
+- error bity `0x10`, `0x40`, `0x01000000` v `base+0x04` mapuje na status `5`, `3`, `6`
+- z `((base->STAT >> 1) & 7)` rozlisuje RX-ready, TX-ready, NACK/error a complete/STOP vetve
+- pri TX vetvi bere bajty z `tx_buf` a zapisuje je do `base+0x28`
+- pri RX vetvi cte `base+0x28` do `rx_buf`
+- po TX casti a nenulove RX delce posila repeated START s `(slave_addr << 1) | 1`
+
 ## Realy I2C trace
 
 Soubor:
@@ -162,7 +192,7 @@ To velmi dobre sedi s lokalni evidenci:
 
 | Command | Pracovni nazev | Staticky dukaz |
 | --- | --- | --- |
-| `0x02` | `AFE_Status_Protect` kandidat | `0x1A1A`, `0x1D48`, `0x1DC4`; read/clear/check status bits. |
+| `0x02` | `AFE_Status_Protect` kandidat | PBP005 `0x1D48/0x1D60/0x1DFC/0x19B6`; read/clear/check status bits, ADOC mask `0x1000`. |
 | `0x03` | `AFE_Config_Control` kandidat | `0x17D8`, `0x19C6`, `0x1B6C`; read/write word, docasne meneno pri temperature read path. |
 | `0x05` | `AFE_Init_PowerControl` kandidat | `0x1888` zapisuje `0x0010` po `0x03` write. |
 | `0x0E` | `AFE_CellBalance_Control` kandidat | PBP005 `0x1CDC` zapisuje `0xFFC0` nebo `0xFFC0 | (1 << cell_index)`; volano z balance funkce se stringy `Bal Dn` a `Bal%u>%u`. |
@@ -323,13 +353,24 @@ To znamena:
 
 ## Vztah k ADOC, AFEPNR, AFENR
 
-`ADOC` cesta vola `0x1DC4(2)`:
+PBP005 `ADOC` cesta pracuje s AFE status registrem `0x02`.
 
-- zapisuje/cte command `0x02`
-- pouziva status bity
-- pri potvrzeni v hlavni smycce loguje `ADOC`
+Relevantni funkce:
 
-To znamena, ze `ADOC` je pravdepodobne protection/status bit z AFE_3705T, ne lokalni MCU-only stav.
+- `0x1D48` cte command `0x02` a vraci `(status & 0x1000) != 0`
+- `0x1D60(tries)` zapisuje `0x02 = 0xFFFF`, znovu cte `0x02` a overuje, zda bit `0x1000` zmizel
+- `0x1DFC` cte `0x02` pro log `AINT:0x%X`
+- `0x19B6` zapisuje `0x02 = 0xFFFF`, clear/ack status kandidat
+- `0x4DB8` je ADOC interrupt handler, ktery vola `0x1D60(2)` a pri potvrzeni nastavuje latch
+
+To znamena, ze `ADOC` je protection/status bit z AFE_3705T/OZ3705, ne lokalni MCU-only stav.
+Pracovni maska:
+
+```text
+register 0x02, bit 12, mask 0x1000
+```
+
+V normalnim sniffu byl `0x02 = 0x8082`, tedy `0x1000` nebyl nastaven.
 
 Logy `AFEPNR`, `AFENR`, `AFECommErr(I/V)` sedi s tim, ze firmware rozlisuje:
 

@@ -245,7 +245,7 @@ Pracovni zaver: PBP002 bit `0x80` v persistentnim fault wordu je zatim nejspis n
 
 ## RAM markery
 
-PBP002 ma stejne marker helpery jako PBP004:
+PBP002 ma stejne markerove schema jako PBP004, ale zatim bez nalezeneho ekvivalentu PBP004 word-writeru `0x4040`.
 
 | Funkce | Vyznam |
 | --- | --- |
@@ -253,10 +253,23 @@ PBP002 ma stejne marker helpery jako PBP004:
 | `0x2F5E` | vraci 1, pokud `[0x10000000+4] != 0xA5` |
 | `0x2F6E` | vraci 1, pokud `[0x10000000+5] != 0xA5` |
 
+Init/default cesta:
+
+```text
+0x43CA -> 0x274C
+0x43CE -> 0x2F54  // reset markeru na 5A/5A
+0x43D2 -> 0x27EC
+```
+
 V PBP002 jsou markery primo spojene s faulty:
 
-- marker4 + vysoke napeti -> `0x04/FOV`
-- marker5 + nizke napeti -> `0x08/FUV`
+| Marker | Podminka | Timer/counter | Fault |
+| --- | --- | --- | --- |
+| `[0x10000004] != 0xA5` | vysoke cell napeti, mez kolem `0x10CC` / 4300 mV | `ctx+0x40`, prah `0xC9` | `0x04/FOV` |
+| `[0x10000005] != 0xA5` | nizke cell napeti, mimo stavy `0x02/0x03` | `ctx+0x41`, prah `0xC9` | `0x08/FUV` |
+
+Vychozi NVM obraz ma na `0x7E04/0x7E05` hodnoty `5A 5A`.
+Primy zapis konstanty `0xA5` do markeru zatim nebyl v PBP002 nalezen.
 
 ## Service/fixture automat
 

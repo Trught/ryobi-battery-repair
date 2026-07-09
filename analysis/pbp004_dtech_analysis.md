@@ -136,7 +136,7 @@ Tyto requesty jsou payload uvnitr `opcode 0x0005`.
 | --- | --- | --- |
 | `0x01` | auth | Fixture auth: `0x01 + 10B key`. |
 | `0x03` | state-changing | 32bit threshold/current request; vyzaduje delku 5 a hodnotu `>= 0x54A48E01`; vola `0x494E`. |
-| `0x04` | write | Delka `0x29`; vola `0x3878`, `0x4040`, `0x3F64`, `0x3918`; barcode/config update kandidat. |
+| `0x04` | write | Delka `0x29`; vola `0x3878`, `0x4040`, `0x3F64`, `0x3918`; zapisuje config/string RAM a marker/config word do `0x10000004` pres `0x4040`. Low byte wordu je v teto vetvi `0x5A`. Neni read-only. |
 | `0x05..0x08` | ack | Jednoducha odpoved/error path pres `0x202E(1)`. |
 | `0x09` | state-changing | Ack, delay `0x7D0`, vola `0x4998(0x40)` a `0x4A1E`. |
 | `0x0A` | read | Kopiruje tri bloky po `0x2A` bajtech do odpovedi, posila delku `0x7F`. |
@@ -144,6 +144,60 @@ Tyto requesty jsou payload uvnitr `opcode 0x0005`.
 
 Nejzajimavejsi read-only kandidat po auth je fixture request `0x0A`.
 Opatrne: i po uspesne auth zustava `0x0005/0x0A` aktivni dotaz a neni jeste overeny na realnem HW.
+
+## RAM markery a request 0x04
+
+PBP004 marker helpery:
+
+| Funkce | Vyznam |
+| --- | --- |
+| `0x4040` | zapise 32bit `r0` do `[0x10000000+4]` |
+| `0x4046` | nastavi `[0x10000000+4]` a `[0x10000000+5]` na `0x5A` |
+| `0x4050` | vraci 1, pokud `[0x10000000+4] != 0xA5` |
+| `0x4060` | vraci 1, pokud `[0x10000000+5] != 0xA5` |
+
+Init/default cesta:
+
+```text
+0x5570 -> 0x3878
+0x5574 -> 0x4046  // reset markeru na 5A/5A
+0x5578 -> 0x3918
+```
+
+D-tech fixture request `0x04` obsahuje call-site:
+
+```text
+0x3778 -> 0x3878
+0x377C movs r0, #0x5A
+0x3780 strb r0, [sp]
+0x3782 ldr r0, [sp]   // low byte = 0x5A, horni 3 bajty nejsou v tomto rezu jasne inicializovane
+0x3784 -> 0x4040  // write word to 0x10000004
+0x378A -> 0x3F64
+0x378E -> 0x3918
+```
+
+Staticky je tedy potvrzeno, ze request `0x04` muze zmenit bajty `0x10000004..0x10000007`, ale v teto vetevni sekvenci neni potvrzen zapis `0xA5`; potvrzeny je low byte `0x5A`.
+
+Pomocne funkce:
+
+| Funkce | Vyznam |
+| --- | --- |
+| `0x3878` | Defaultuje RAM config: kopiruje 0x28 bajtu default stringu `130597003|00000000000000|PBP004|` do `0x10000028`, inicializuje souvisejici pole a nastavuje dirty flag. |
+| `0x3F64(payload+1)` | Kopiruje 0x28 bajtu z request payloadu `payload[1..0x28]` do `0x10000028`, nastavuje `0x100001B8 = 1` a bit `0x80` v `0x100001B0`. |
+| `0x3918` | Pokud je dirty flag `0x100001B8` nastaveny, vola NVM/flash write `0x4A48(0x10000000, 0x7E00, 0x25)` a flag nuluje. `0x25` je pocet 32bit slov, tedy zapis `0x7E00..0x7E93`. |
+
+Payload format requestu `0x04`:
+
+| Offset v payloadu | Delka | Vyznam |
+| --- | ---: | --- |
+| `0x00` | 1 | Request ID `0x04`. |
+| `0x01..0x28` | 0x28 / 40 B | Kopie do RAM `0x10000028`, persistovana na NVM `0x7E28..0x7E4F`. Default string je `130597003\|00000000000000\|PBP004\|` nasledovany paddingem/nulami. |
+
+Poznamka: NVM byte `0x7E27` je posledni byte predchoziho wordu a ve fixed dumpu je ASCII `O`, takze WaveForms/ASCII string search ukazuje text jako `O130...`. Samotny request `0x04` ale zacina kopirovat az na offsetu `+0x28`.
+
+Rozsah flash persistence je uzavreny pro tuto vetev: `0x7E00..0x7E93`.
+Persistent fault word `0x7E94` request `0x04` primo neprepisuje.
+Request `0x04` proto neni bezpecne pouzivat jako read-only diagnostiku.
 
 ## Fault 0x04
 

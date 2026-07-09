@@ -7,7 +7,7 @@ Soubory:
 - `firmware_static_analysis.md` - hlavni souhrn funkci, datovych struktur, NVM/RAM oblasti, fault bitu a otevrenych bodu.
 - `dtech_uart_protocol.md` - zatim zjisteny D-tech/fixture UART protokol, delky ramcu, CRC, auth sekvence a klice.
 - `pbp002_state_machine.md` - samostatny rozbor PBP002 lockout wordu, fault bitu a service/fixture state machine.
-- `afe_3705t_smbus.md` - rozbor SMBus/I2C zarizeni `0x29`, realneho trace a pracovni register mapy AFE `3705T`.
+- `afe_3705t_smbus.md` - rozbor SMBus/I2C zarizeni `0x29`, realneho trace, OZ3705 kontextu, cell balancingu a pracovni register mapy AFE `3705T`.
 - `../tools/decode_afe_i2c_trace.py` - offline dekoder Digilent WaveForms I2C CSV trace pro AFE `0x29`.
 - `pbp004_dtech_analysis.md` - samostatny rozbor PBP004 D-tech parseru, auth sekvence, fixture key a requestu.
 - `pbp005_state_machine.md` - samostatny rozbor PBP005 BMS a service/fixture state machine.

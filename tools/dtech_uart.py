@@ -89,7 +89,7 @@ DTECH_TRANSPORT_OPCODES = {
 PBP004_FIXTURE_REQUESTS = {
     0x01: DtechItem("auth", "fixture auth payload: 0x01 + 10-byte fixture key"),
     0x03: DtechItem("state-changing", "32-bit threshold/current request; requires length 5 and value >= 0x54a48e01; calls 0x494e"),
-    0x04: DtechItem("write", "length 0x29 request; calls 0x3878/0x4040/0x3f64/0x3918; barcode/config update candidate"),
+    0x04: DtechItem("write", "length 0x29 request; copies payload[1..0x28] to 0x10000028; calls 0x4040 with low byte 0x5a for marker/config word at 0x10000004; may write NVM 0x7e00..0x7e93; not read-only"),
     0x05: DtechItem("ack", "simple one-byte response/error path"),
     0x06: DtechItem("ack", "simple one-byte response/error path"),
     0x07: DtechItem("ack", "simple one-byte response/error path"),
@@ -191,7 +191,7 @@ PBP002_SERVICE_STATES = {
 
 
 PBP005_LOG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bADOC\b"), "ADOC event: fault bit 0x40 source, confirmed PBP005 lockout path"),
+    (re.compile(r"\bADOC\b"), "ADOC event: PBP005 fault bit 0x40; AFE status 0x02 mask 0x1000 candidate"),
     (re.compile(r"\bADOC_E\b"), "ADOC recovery/clear path"),
     (re.compile(r"\bAFERc\b"), "AFE recovery/clear path"),
     (re.compile(r"\bDOCRc\b"), "discharge over-current recovery/clear path candidate"),
@@ -200,13 +200,24 @@ PBP005_LOG_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bSlp\s+(\d+)"), "sleep entry path"),
     (re.compile(r"\b!Slp\s+(\d+)"), "sleep aborted or wake path"),
     (re.compile(r"\bDPDWAKE\b"), "deep-power-down wake event"),
+    (re.compile(r"\bAFECommErr\(V\)"), "AFE communication error during voltage measurement"),
+    (re.compile(r"\bAFECommErr\(I\)"), "AFE communication error during current measurement"),
     (re.compile(r"\bAFEPNR\b"), "AFE power-not-ready candidate"),
     (re.compile(r"\bAFENR\b"), "AFE not-ready candidate"),
     (re.compile(r"\bAINT:0x([0-9a-fA-F]+)"), "AFE interrupt/status log"),
     (re.compile(r"\bChgWkI\b"), "charger/wake interrupt candidate"),
-    (re.compile(r"\bEOVs\b"), "over-voltage set/event candidate"),
-    (re.compile(r"\bEUVs\b"), "under-voltage set/event candidate"),
-    (re.compile(r"\bEOTs\b"), "over-temperature set/event candidate"),
+    (re.compile(r"ChgV:\s*(-?\d+)mV\s+(\d+)\s+fail"), "charge-voltage validation failed; mV and status/count"),
+    (re.compile(r"\bEOVs\b"), "PBP005 event over-voltage set; fault bit 0x04 path, marker A gate"),
+    (re.compile(r"\bEUVs\b"), "PBP005 event under-voltage set; fault bit 0x08 path, marker B gate"),
+    (re.compile(r"\bEOTs\b"), "PBP005 event over-temperature set; fault bit 0x02 path, marker B gate"),
+    (re.compile(r"\bEUB Time St\b"), "cell-unbalance timer started; model-dependent fault path"),
+    (re.compile(r"\bEUB Flag\b"), "cell-unbalance timed fault flag; model-dependent fault path"),
+    (re.compile(r"\bEUV Time St\b"), "extreme/severe under-voltage timer started; model-dependent fault path"),
+    (re.compile(r"\bEUV Flag\b"), "extreme/severe under-voltage timed fault flag; model-dependent fault path"),
+    (re.compile(r"\bBal Dn\b"), "cell balancing finished; firmware writes AFE 0x0e = 0xffc0"),
+    (re.compile(r"\bBal(\d+)>(\d+)"), "cell balancing started; log is max_cell_mv > min_cell_mv"),
+    (re.compile(r"\bBCHR_FV:(-?\d+)"), "battery/charger full-voltage threshold log"),
+    (re.compile(r"\bcllV>CFV\b"), "cell voltage greater than charge/full-voltage threshold"),
     (re.compile(r"Fail:x([0-9a-fA-F]+)"), "failure bitmask/status log"),
     (re.compile(r"\bPS:(\d+)\s+(\d+)"), "power/service state log"),
     (re.compile(r"\bHB\s+(\d+)"), "heartbeat/status log"),
@@ -417,6 +428,17 @@ def run_auth(port, fixture_key: bytes, timeout_s: float, verbose: bool) -> None:
     )
 
 
+def run_pbp004_read_blocks(port, fixture_key: bytes, timeout_s: float, verbose: bool) -> Frame:
+    """Authenticate and send only the statically identified read-like fixture request 0x0A."""
+    run_auth(port, fixture_key, timeout_s, verbose)
+    return transact(
+        port,
+        Frame(opcode=0x0005, payload=bytes([0x0A]), lower=1),
+        timeout_s,
+        verbose,
+    )
+
+
 def parse_pbp005_log_line(line: str) -> str | None:
     return parse_log_line("pbp005", line)
 
@@ -548,6 +570,17 @@ def main(argv: list[str]) -> int:
     listen = sub.add_parser("listen", help="Print incoming D-tech frames")
     listen.add_argument("--count", type=int, default=0, help="0 means forever")
 
+    read_blocks = sub.add_parser(
+        "pbp004-read-blocks",
+        help="PBP004-only safe path: auth, then fixture request 0x0A read candidate",
+    )
+    read_blocks.add_argument(
+        "--key",
+        type=parse_hex_bytes,
+        default=DEFAULT_FIXTURE_KEY,
+        help="10-byte D-tech fixture key as hex; default is the PBP004 key",
+    )
+
     listen_log = sub.add_parser("listen-log", help="Print ASCII diagnostic log lines, useful for PBP002/PBP005")
     listen_log.add_argument("--count", type=int, default=0, help="0 means forever")
     listen_log.add_argument("--hex", action="store_true", help="also print raw bytes as hex")
@@ -583,7 +616,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     try:
-        if args.cmd in {"auth", "raw", "listen"}:
+        if args.cmd in {"auth", "raw", "listen", "pbp004-read-blocks"}:
             require_pbp004(args.profile, args.cmd)
     except ProtocolError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -601,6 +634,12 @@ def main(argv: list[str]) -> int:
         if args.cmd == "auth":
             run_auth(port, args.key, args.timeout, args.verbose)
             print("auth sequence completed")
+        elif args.cmd == "pbp004-read-blocks":
+            reply = run_pbp004_read_blocks(port, args.key, args.timeout, args.verbose)
+            print(
+                f"reply opcode=0x{reply.opcode:04x} len={len(reply.payload)} "
+                f"payload={reply.payload.hex(' ')}"
+            )
         elif args.cmd == "raw":
             reply = transact(
                 port,
